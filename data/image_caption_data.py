@@ -13,7 +13,27 @@ import open_clip
 #       used, matching §1's "No segmentation masks, bounding boxes, or patch annotations".
 #   [summary §2 Prompt augmentation] -- implemented in __getitem__ (noun extraction + templates).
 class CocoDataset(Dataset):
-    def __init__(self, root_dir, annotation_file, apply_transform=False, img_size=400):
+    # [summary §2] paper's exact 7 CLIP prompt templates (Appendix A.2.2), vs. this reimpl's
+    # original 5. Used when paper_faithful_prompts=True.
+    PAPER_TEMPLATES = [
+        'itap of a {}.',
+        'a bad photo of the {}.',
+        'a origami {}.',
+        'a photo of the large {}.',
+        '{} in a video game.',
+        'art of the {}.',
+        'a photo of the small {}.',
+    ]
+    ORIGINAL_TEMPLATES = [
+        'a picture of {}.',
+        'itap of {}.',
+        'a photograph of {}.',
+        'this picture contains {}.',
+        'a good photo of {}.'
+    ]
+
+    def __init__(self, root_dir, annotation_file, apply_transform=False, img_size=400,
+                 paper_faithful_prompts=False):
 
         # chunk for original COCO dataloader
         self.root_dir = root_dir
@@ -34,15 +54,8 @@ class CocoDataset(Dataset):
         self.ids = list(sorted(self.coco.imgs.keys()))
 
         # [summary §2: "wrap them with one of seven CLIP prompt templates"] -- the templates.
-        # (The summary lists seven; this reimpl uses five variants of the same idea.)
-        # chunk for noun phrase extraction -->> creating a prompt from template
-        self.template = [
-            'a picture of {}.',
-            'itap of {}.',
-            'a photograph of {}.',
-            'this picture contains {}.',
-            'a good photo of {}.'
-        ]
+        self.paper_faithful_prompts = paper_faithful_prompts
+        self.template = self.PAPER_TEMPLATES if paper_faithful_prompts else self.ORIGINAL_TEMPLATES
         self.nlptk = spacy.load("en_core_web_sm")
 
         # chunk for tokenization
@@ -50,41 +63,53 @@ class CocoDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.ids)
+        # paper_faithful_prompts mode emits TWO training examples per image per epoch (the
+        # original caption AND a templated noun phrase, see __getitem__) instead of one.
+        return len(self.ids) * 2 if self.paper_faithful_prompts else len(self.ids)
 
-    def __getitem__(self, index):
-        
-        # chunk for original COCO dataloader
-        coco = self.coco
-        img_id = self.ids[index]
-        caption = coco.imgToAnns[img_id][0]['caption'] # a python string
-
-        img_info = coco.loadImgs(img_id)[0]
+    def _load_image(self, img_info):
         img_path = f"{self.root_dir}/{img_info['file_name']}"
         image = Image.open(img_path).convert('RGB')
-        if self.apply_transform == True:
-            image = self.train_transform(image) # tensor of shape = [3, H, W]
-        else:
-            image = self.val_transform(image)
+        return self.train_transform(image) if self.apply_transform else self.val_transform(image)
 
-        # [summary §2: "They extract nouns from each caption and wrap them with one of seven CLIP
-        # prompt templates ... These prompts are added alongside the original caption."]
-        # We build ONE text per image per step: half the time the original caption, half the time a
-        # templated noun phrase -- so over training the model sees both, as in §2's example.
-        # chunk for noun phrase extraction -->> creating a prompt from template
+    def _noun_phrase_text(self, caption):
         processed_text = self.nlptk(caption)
         all_noun_phrases = [chunk.text.lower() for chunk in processed_text.noun_chunks]
+        if len(all_noun_phrases) == 0:
+            return caption
+        random_noun_phrase = random.choice(all_noun_phrases)
         random_template = random.choice(self.template)
+        return random_template.format(random_noun_phrase)
 
-        # use original caption 50% of the time
-        nounphrase_or_full_caption = random.choice([0,1])
+    def __getitem__(self, index):
+        coco = self.coco
 
-        if len(all_noun_phrases) != 0 and nounphrase_or_full_caption == 0:
-            random_noun_phrase = random.choice(all_noun_phrases)
-            single_noun_phrase_per_img = random_template.format(random_noun_phrase)
+        if self.paper_faithful_prompts:
+            # [summary §2: "These prompts are added alongside the original caption."] -- literally
+            # two separate training examples per image: the original caption (variant 0) and a
+            # templated noun phrase (variant 1), rather than a 50/50 substitute for one slot.
+            img_idx, variant = divmod(index, 2)
+            img_id = self.ids[img_idx]
+            caption = coco.imgToAnns[img_id][0]['caption']
+            img_info = coco.loadImgs(img_id)[0]
+            image = self._load_image(img_info)
+            text = caption if variant == 0 else self._noun_phrase_text(caption)
+            tokenized_phrase = self.open_clip_tokenizer(text).squeeze()
+            return image, tokenized_phrase
+
+        # Original behavior: ONE text per image per step, half the time the original caption,
+        # half the time a templated noun phrase -- see README "Differences from the paper".
+        img_id = self.ids[index]
+        caption = coco.imgToAnns[img_id][0]['caption'] # a python string
+        img_info = coco.loadImgs(img_id)[0]
+        image = self._load_image(img_info)
+
+        nounphrase_or_full_caption = random.choice([0, 1])
+        if nounphrase_or_full_caption == 0:
+            single_noun_phrase_per_img = self._noun_phrase_text(caption)
         else:
             single_noun_phrase_per_img = caption
-        
+
         tokenized_phrase = self.open_clip_tokenizer(single_noun_phrase_per_img).squeeze()
         return image, tokenized_phrase
 

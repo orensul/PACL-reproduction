@@ -19,15 +19,20 @@ sentence the code implements). Read the two side by side.
 """
 
 class Patch_Projection(torch.nn.Module):
-    def __init__(self):
+    # [summary §3] the trainable vision embedder: a residual block with two linear layers on the
+    # main branch and one linear layer on the skip branch. The paper (Appendix A.1) uses ReLU
+    # between the main-branch linears; this reimpl originally used GELU instead -- see
+    # `activation` param and README "Differences from the paper".
+    def __init__(self, activation="gelu"):
         super(Patch_Projection, self).__init__()
-        
+        act = {"gelu": nn.GELU, "relu": nn.ReLU}[activation]
+
         self.linear_projection = self.text_projection = nn.Sequential(
             nn.Linear(768, 512),
         )
         self.non_linear_projection = nn.Sequential(
             nn.Linear(768, 512),
-            nn.GELU(),
+            act(),
             nn.Linear(512, 512),
         )
     def forward(self, x):
@@ -35,8 +40,17 @@ class Patch_Projection(torch.nn.Module):
 
 
 class open_clip_pacl(torch.nn.Module):
-    def __init__(self):
+    # [summary §3] `weighting`: "sigmoid" is this reimpl's original sigmoid(10*s) patch weighting;
+    # "softmax" matches the paper's Eq. (2)-(3) softmax-over-patches (see README divergences).
+    # `activation`: main-branch activation in Patch_Projection ("relu" matches the paper's Appendix A.1).
+    # `train_text_projection`: paper trains ONLY the vision embedder and keeps CLIP's text embedder
+    # frozen/untouched ("we only train the vision embedder, i.e., theta = {e_v}"); this reimpl
+    # originally trained an additional text_projection head too. Set False for paper fidelity.
+    def __init__(self, weighting="sigmoid", activation="gelu", train_text_projection=True):
         super(open_clip_pacl, self).__init__()
+        assert weighting in ("sigmoid", "softmax")
+        self.weighting = weighting
+        self.train_text_projection = train_text_projection
 
         # [summary §3: "the CLIP image and text encoders remain frozen"] backbone stays frozen;
         # only the projection head(s) below are trained. (Paper freezes CLIP ViT-B/16; this reimpl
@@ -56,13 +70,14 @@ class open_clip_pacl(torch.nn.Module):
         self.visual_projection = nn.Sequential(
             nn.LayerNorm(768),
             nn.Dropout(0.1),
-            Patch_Projection(),
+            Patch_Projection(activation=activation),
         )
-        self.text_projection = nn.Sequential(
-            nn.LayerNorm(512),
-            nn.Dropout(0.1),
-            nn.Linear(512, 512),
-        )
+        if self.train_text_projection:
+            self.text_projection = nn.Sequential(
+                nn.LayerNorm(512),
+                nn.Dropout(0.1),
+                nn.Linear(512, 512),
+            )
 
     def interpolate_pos_embed(self, pos_embed, img_size):
         cls_pos_embed, patch_pos_embed = pos_embed[0,:], pos_embed[1:,:] # torch.Size([768]) torch.Size([196, 768])
@@ -82,15 +97,18 @@ class open_clip_pacl(torch.nn.Module):
 
     def forward_text(self, caps):
         # [summary §3: "The frozen CLIP text encoder produces a text embedding"] encode the text
-        # into a single CLS token, then project it.
+        # into a single CLS token, then project it -- unless train_text_projection=False, in which
+        # case the paper's "text embedder et frozen" is honored literally: no projection at all.
         text_cls = self.clip_model.encode_text(caps)
-        return self.text_projection(text_cls) # shape = [B, 768]
-    
+        if self.train_text_projection:
+            return self.text_projection(text_cls) # shape = [B, 768]
+        return text_cls # shape = [B, 512], untouched frozen CLIP text embedding
+
     def patch_alignment(self, visual_patch_proj, text_cls_proj): # shapes =  [B, 196, 768], [B, 768]
         # [summary §3: "The cosine similarity between every patch and the text embedding is
         # computed. A softmax over these similarities gives an attention weight for each patch."]
-        # NOTE: the summary uses softmax over tokens; this reimpl uses sigmoid(10*s) instead
-        # (see README "Differences from the paper").
+        # weighting="sigmoid" (this reimpl's original): sigmoid(10*s) per patch, independent, not a
+        # distribution. weighting="softmax" (paper's Eq. 2-3): softmax over patches, sums to 1.
 
         # normalize visual patch tokens and then permute
         normalized_visual_patch_proj = F.normalize(visual_patch_proj, dim=-1)
@@ -101,10 +119,14 @@ class open_clip_pacl(torch.nn.Module):
 
         # compute dot product
         patch_activations = normalized_text_cls_proj @ normalized_visual_patch_proj # shapes =  [B, 1, 196]
-        patch_activations = patch_activations.squeeze() # shapes =  [B, 196]
+        patch_activations = patch_activations.squeeze(1) # shapes =  [B, 196]
         # because of dot product, the range is between -1 (least similar) to +1 (most similar)
-        # multiply by 10 and apply sigmoid function. this squashes the range from 0 to 1 for every element (not necessarily sums to 1 like that of a softmax function)
-        return F.sigmoid(patch_activations*10)
+        if self.weighting == "sigmoid":
+            # multiply by 10 and apply sigmoid. squashes to (0,1) per element, not summing to 1.
+            return F.sigmoid(patch_activations*10)
+        else:
+            # paper's Eq. (2)-(3): softmax over patches -- a real attention distribution per text.
+            return F.softmax(patch_activations*10, dim=-1)
     
     def forward(self, images, caps):
         # [summary §3] the full training forward pass for an (image, text) pair.

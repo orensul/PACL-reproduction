@@ -1,0 +1,14 @@
+# Install a CUDA build of torch/torchvision matching your driver first, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# then: pip install -r requirements.txt
+torch
+torchvision
+open_clip_torch
+pycocotools
+spacy
+numpy
+Pillow
+matplotlib
+requests
+# spaCy English model (also installable via: python -m spacy download en_core_web_sm)
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl

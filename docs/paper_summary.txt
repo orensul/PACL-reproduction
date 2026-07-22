@@ -1,0 +1,42 @@
+Paper: Open Vocabulary Semantic Segmentation with Patch Aligned Contrastive Learning
+
+
+Method summary:
+
+1) Training data
+Three datasets with image–text pairs:
+Conceptual Captions 3M (GCC-3M)
+Conceptual Captions 12M (GCC-12M)
+YFCC15M (a 15M-image subset of Flickr100M)
+
+Each example consists only of an image and one or more image-level captions. No segmentation masks, bounding boxes, or patch annotations are used.
+
+2) Prompt augmentation
+They extract nouns from each caption and wrap them with one of seven CLIP prompt templates (e.g., "a photo of a dog"). These prompts are added alongside the original caption.
+
+Example:
+Image
+↓
+Texts
+text1: "A brown dog standing in a grassy field."
+text2: "a photo of a dog"
+text3: "a photo of a field"
+.
+.
+.
+text7: 
+
+
+
+3) Patch-aligned contrastive training
+For every (image, text) pair:
+The frozen CLIP ViT produces patch embeddings (not the CLS token).
+The frozen CLIP text encoder produces a text embedding.
+A small learnable projection head projects each patch into CLIP's shared embedding space.
+The cosine similarity between every patch and the text embedding is computed.
+A softmax over these similarities gives an attention weight for each patch.
+The weighted average of the patch embeddings becomes the image representation for that text.
+This weighted image representation is compared with the text embedding using the standard InfoNCE (CLIP) contrastive loss.
+Only the small projection head is updated; the CLIP image and text encoders remain frozen.
+
+The key intuition is that, to maximize image–text similarity, the model learns to assign higher weights to patches corresponding to the concepts mentioned in the text (e.g., the "dog" patch for the prompt "a photo of a dog"), even though it never receives explicit localization labels.

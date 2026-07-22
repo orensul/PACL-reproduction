@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pth
+*.pt
+*.zip
+# datasets live outside the repo; never commit them
+data/MSCOCO/
+*.json.zip
+# inference outputs
+results/activation_map*.png
+.venv/
+venv/
+.DS_Store
+# local Claude Code config
+.claude/

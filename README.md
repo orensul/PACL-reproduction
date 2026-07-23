@@ -18,13 +18,16 @@ re-implementation, with practical fixes for headless servers and CLI-driven conf
 This is a faithful reproduction of the PACL **method/mechanism** and the community COCO demo —
 **not** of the paper's headline benchmark results. Please read this before citing it as "reproducing PACL."
 
-- **No results have been verified in this environment.** There is no trained checkpoint
-  (`pacl_ft.pth`) committed, and training has not been run here.
+- The method has been **trained and evaluated end-to-end** here (see [Results](#results)):
+  **17.72% mIoU on Pascal VOC2012 `val`**, versus the paper's **72.3**. This is a working,
+  repeatable pipeline — **not** a reproduction of the paper's numbers.
 - The paper trains on **~30M image-text pairs (GCC-3M + GCC-12M + YFCC-15M)** for 10 days on
   4× A100; this repo trains on **MS-COCO 2017 (~118k images)**. It will **not** reproduce the
   paper's mIoU numbers.
-- There is **no segmentation-benchmark evaluation** (mIoU on Pascal VOC / Pascal Context /
-  COCO-Stuff / ADE20K) here — only single-image activation-map inference.
+- Segmentation-benchmark evaluation covers **Pascal VOC only** (`evaluate_miou.py`).
+  Pascal Context, COCO-Stuff and ADE20K are still not implemented.
+- **No trained checkpoint is committed** (`*.pth` is git-ignored), so the number below cannot be
+  re-derived from a fresh clone without retraining.
 
 ### Differences from the paper
 
@@ -37,7 +40,44 @@ This is a faithful reproduction of the PACL **method/mechanism** and the communi
 | Batch / schedule | 4096 global, 10 epochs (4× A100, ~10 days) | 1024 global, 10 epochs |
 | Patch weighting | `softmax(s)` over tokens | `sigmoid(10·s)` |
 | Inference | stride-4 trick + bilinear upscale → full segmentation | 25×25 patch activation map |
-| Evaluation | mIoU on 4 seg benchmarks + 12 classification datasets | single-image activation map only |
+| Evaluation | mIoU on 4 seg benchmarks + 12 classification datasets | mIoU on Pascal VOC only |
+| **Result** | **72.3 mIoU** (VOC, ViT-B/16) | **17.72 mIoU** (VOC2012 val) |
+
+Since 2026-07-22 the repo also ships **opt-in flags** to run the paper's exact choices
+(`--weighting softmax`, `--activation relu`, `--freeze_text_projection`, `--optimizer adamw`,
+`--lr_schedule cosine`, `--paper_faithful_prompts`). They all **default to off**, so the "This repo"
+column above describes the default behavior, and both configurations stay comparable under the
+same eval harness.
+
+---
+
+## Results
+
+Run of **2026-07-22** (commit `68068b4`). Two training runs were done:
+
+| Run | Training data | Checkpoint | VOC2012 val mIoU |
+|---|---|---|---|
+| Sanity run (Phase 3) | COCO `val2017` (~5k images) | `pacl_ft.pth` | not evaluated |
+| Full run (Phase 5a) | COCO `train2017` (~118k images) | `pacl_ft_full.pth` | **17.72%** |
+| *Paper, for reference* | *~30M pairs (GCC + YFCC)* | — | *72.3* |
+
+Evaluation used the `evaluate_miou.py` defaults: 400px input, prompt template
+`"a picture of a {}."`, `sigmoid(10·s)` patch weighting, background by threshold at `0.7`,
+no prompt ensemble.
+
+**Qualitative (Phase 4).** Activation maps localize, but imperfectly. Moving from the sanity run
+to the full run visibly sharpened the *keyboard* and *cat* maps — compare `results/*.png` (sanity)
+with `results/full_*.png` (full), side by side in `results/old_vs_new.png`. **Dog and cat are still
+confused** on the anecdotal test image, so text conditioning is only partly working.
+
+### What was not recorded
+
+The run predates any result-logging, so beyond the single mIoU figure above **nothing was
+persisted**: no training log or loss curve, no per-class IoU breakdown, no epoch count or
+wall-clock time, and no record of the exact CLI arguments used. The training defaults
+(batch 1024, 10 epochs, Adam lr 1e-4, `sigmoid`, `gelu`) are the *likely* configuration because
+the paper-fidelity flags default to off — but this is inferred, not logged. Treat 17.72% as a
+baseline to beat, not a precisely characterized data point.
 
 ---
 
@@ -61,8 +101,11 @@ PACL-reproduction/
 │   └── utils.py               # inference preprocessing (resize/normalize/tokenize)
 ├── train_pacl.py              # training loop (DataParallel, bf16 AMP), argparse-driven
 ├── pacl_inference.py          # single-image activation map for a text prompt (headless)
-├── scripts/download_coco.sh   # fetch MS-COCO 2017 into the expected layout
-├── results/                   # sample activation maps (cat.png, dog.png)
+├── evaluate_miou.py           # Pascal VOC mIoU harness (per-class IoU + mIoU)
+├── scripts/
+│   ├── download_coco.sh       # fetch MS-COCO 2017 into the expected layout
+│   └── smoke_test.py          # shape/loss sanity check, no data needed
+├── results/                   # sample activation maps (sanity: *.png, full run: full_*.png)
 ├── docs/                      # the paper + a short summary
 └── requirements.txt
 ```
@@ -110,6 +153,22 @@ python pacl_inference.py \
 ```
 
 Produces a side-by-side of the input image and the patch activation map for the caption.
+
+## Evaluate (Pascal VOC mIoU)
+
+Needs the VOC2012 devkit (`JPEGImages/`, `SegmentationClass/`, `ImageSets/Segmentation/`):
+
+```bash
+python evaluate_miou.py \
+  --weights  pacl_ft_full.pth \
+  --voc_root /path/to/VOC \
+  --split    val
+```
+
+Prints per-class IoU and the mean. Useful knobs: `--bg_threshold` (background cut-off, default
+`0.7`), `--bg_method entropy`, `--prompt_ensemble`, `--weighting softmax`, and `--limit N` to
+smoke-test on the first N images. Evaluation flags must **match how the checkpoint was trained** —
+e.g. a model trained with `--weighting softmax` should be evaluated with it too.
 
 ## Citation
 
